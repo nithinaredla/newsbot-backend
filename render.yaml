@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: newsbot-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        fromSecret: GEMINI_API_KEY
+      - key: JINA_API_KEY
+        fromSecret: JINA_API_KEY
+      - key: REDIS_URL
+        fromSecret: REDIS_URL
+      - key: CORS_ORIGIN
+        value: https://your-netlify-app.netlify.app
