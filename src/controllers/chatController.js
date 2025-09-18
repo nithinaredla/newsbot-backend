@@ -1,14 +1,21 @@
 const ragService = require('../services/ragService');
 const geminiService = require('../config/gemini');
 const redisClient = require('../config/redis');
-
+async function checkPineconeStatus() {
+  try {
+    const stats = await ragService.getCollectionStats();
+    return stats.status === 'ok' && stats.count > 0;
+  } catch (error) {
+    return false;
+  }
+}
 class ChatController {
   async handleMessage(req, res, next) {
     try {
       const { message, sessionId } = req.body;
-      
+
       if (!message || !sessionId) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Message and sessionId are required'
         });
       }
@@ -18,33 +25,33 @@ class ChatController {
 
       // Get conversation context from previous messages (limit to last 3 messages)
       const conversationContext = await this.getConversationContext(sessionId, 3);
-      
+
       console.log('Conversation context length:', conversationContext.length);
-      
+
       // Retrieve relevant news chunks with conversation context
       const relevantChunks = await ragService.retrieveRelevantChunks(
-        message.trim(), 
+        message.trim(),
         conversationContext
       );
-      
+
       console.log('Retrieved', relevantChunks.length, 'relevant chunks');
-      
+
       // Generate response using Gemini with full conversation context
       const botResponse = await this.generateResponse(
-        message.trim(), 
+        message.trim(),
         relevantChunks,
         conversationContext
       );
-      
+
       if (!botResponse || botResponse.trim() === '') {
         throw new Error('Received empty response from AI service');
       }
-      
+
       // Store bot response in Redis
       await this.storeMessage(sessionId, 'assistant', botResponse);
 
-      res.json({ 
-        response: botResponse, 
+      res.json({
+        response: botResponse,
         relevantArticles: relevantChunks,
         sessionId,
         timestamp: new Date().toISOString()
@@ -60,7 +67,7 @@ class ChatController {
     try {
       const client = await redisClient.getClient();
       const messages = await client.lRange(`session:${sessionId}:messages`, 0, -1);
-      
+
       // Get only assistant messages (bot responses) for context, limit length
       const assistantMessages = messages
         .map(msg => {
@@ -84,59 +91,55 @@ class ChatController {
 
   async generateResponse(query, relevantChunks, conversationContext = '') {
     try {
-      let context = "No relevant news articles found.";
-      
+      const isPineconeAvailable = await checkPineconeStatus();
+      let context = "No news articles available for retrieval.";
+
       if (relevantChunks && relevantChunks.length > 0) {
-        context = relevantChunks.slice(0, 3).map((chunk, index) => 
+        context = relevantChunks.slice(0, 3).map((chunk, index) =>
           `[Article ${index + 1}] ${chunk.title}: ${chunk.text.substring(0, 500)}...`
         ).join('\n\n');
       }
 
       const prompt = `
-You are a helpful news assistant. Use the following news articles to answer the user's question.
+You are a helpful news assistant. 
 
-CONVERSATION HISTORY (for context only):
-${conversationContext || 'No previous conversation'}
-
-RELEVANT NEWS ARTICLES:
+${isPineconeAvailable && relevantChunks.length > 0 ? `
+NEWS ARTICLES CONTEXT:
 ${context}
+` : 'NOTE: News retrieval is currently unavailable. Please answer based on your general knowledge.'}
+
+CONVERSATION HISTORY:
+${conversationContext || 'No previous conversation'}
 
 USER'S CURRENT QUESTION: ${query}
 
-INSTRUCTIONS:
-1. Answer based ONLY on the news articles provided above
-2. If the articles don't contain relevant information, say: "I don't have enough information about that from the current news sources."
-3. Keep your response concise and factual
-4. If the user asks for "more info" or "details", provide additional context from the articles
-5. Do not make up information not present in the articles
+Please provide a helpful response. ${isPineconeAvailable ? 'Use the news context when relevant.' : 'Answer based on your general knowledge since news retrieval is temporarily unavailable.'}
 
 ANSWER:`;
 
-      console.log('Prompt length:', prompt.length);
-      
       const response = await geminiService.generateContent(prompt);
-      
+
       if (!response || response.trim() === '') {
         return "I apologize, but I couldn't generate a response. Please try again with a different question.";
       }
-      
+
       return response;
 
     } catch (error) {
       console.error('Error generating response:', error);
-      return "I'm having trouble accessing the news information right now. Please try again in a moment.";
+      return "I'm having trouble accessing information right now. Please try again in a moment.";
     }
   }
 
   async storeMessage(sessionId, role, content) {
     try {
       const client = await redisClient.getClient();
-      const message = { 
-        role, 
-        content, 
-        timestamp: new Date().toISOString() 
+      const message = {
+        role,
+        content,
+        timestamp: new Date().toISOString()
       };
-      
+
       await client.lPush(`session:${sessionId}:messages`, JSON.stringify(message));
       await client.expire(`session:${sessionId}:messages`, 86400); // 24h TTL
     } catch (error) {
@@ -148,14 +151,14 @@ ANSWER:`;
   async getChatHistory(req, res, next) {
     try {
       const { sessionId } = req.params;
-      
+
       if (!sessionId) {
         return res.status(400).json({ error: 'sessionId is required' });
       }
 
       const client = await redisClient.getClient();
       const messages = await client.lRange(`session:${sessionId}:messages`, 0, -1);
-      
+
       const parsedMessages = messages.map(msg => {
         try {
           return JSON.parse(msg);
@@ -165,7 +168,7 @@ ANSWER:`;
         }
       }).filter(msg => msg !== null);
 
-      res.json({ 
+      res.json({
         messages: parsedMessages,
         sessionId,
         count: parsedMessages.length
@@ -179,15 +182,15 @@ ANSWER:`;
   async clearChatHistory(req, res, next) {
     try {
       const { sessionId } = req.params;
-      
+
       if (!sessionId) {
         return res.status(400).json({ error: 'sessionId is required' });
       }
 
       const client = await redisClient.getClient();
       await client.del(`session:${sessionId}:messages`);
-      
-      res.json({ 
+
+      res.json({
         message: 'Chat history cleared successfully',
         sessionId,
         timestamp: new Date().toISOString()
