@@ -1,5 +1,5 @@
 const embeddingService = require('./embeddingService');
-const chromaService = require('../config/chroma');
+const pineconeService = require('../config/pinecone');
 
 class RAGService {
   constructor() {
@@ -16,38 +16,35 @@ class RAGService {
     }
   }
 
-  async retrieveRelevantChunks(query, conversationContext = '', topK = 12) {
+  async retrieveRelevantChunks(query, conversationContext = '', topK = 5) {
     try {
-      const collection = await chromaService.getCollection();
-      if (!collection) {
-        throw new Error('Chroma collection not available. Please check if the collection exists and Chroma server is running.');
-      }
-
+      const index = await pineconeService.getIndex();
+      
       // Combine current query with conversation context for better retrieval
       const searchQuery = conversationContext ? `${conversationContext} ${query}` : query;
       
       const queryEmbedding = await this.getEmbedding(searchQuery);
       
-      const results = await collection.query({
-        queryEmbeddings: [queryEmbedding],
-        nResults: topK,
-        include: ['metadatas', 'distances', 'documents']
+      const results = await index.query({
+        vector: queryEmbedding,
+        topK: topK,
+        includeMetadata: true,
+        includeValues: false
       });
 
-      if (!results.metadatas || results.metadatas.length === 0) {
+      if (!results.matches || results.matches.length === 0) {
         console.log('No results found for query:', query);
         return [];
       }
 
-      return results.metadatas[0].map((metadata, index) => ({
-        text: metadata.text || results.documents[0][index] || '',
-        title: metadata.title || 'Unknown Title',
-        url: metadata.url || '#',
-        authors: metadata.authors || 'Unknown Author',
-        date_publish: metadata.date_publish || '',
-        chunk_id: metadata.chunk_id || index,
-        score: results.distances[0][index] || 0,
-        distance: results.distances[0][index] || 0
+      return results.matches.map((match, index) => ({
+        text: match.metadata.text || '',
+        title: match.metadata.title || 'Unknown Title',
+        url: match.metadata.url || '#',
+        authors: match.metadata.authors || 'Unknown Author',
+        date_publish: match.metadata.date_publish || '',
+        chunk_id: match.metadata.chunk_id || index,
+        score: match.score || 0
       })).filter(chunk => chunk.text.trim().length > 0);
 
     } catch (error) {
@@ -58,20 +55,13 @@ class RAGService {
 
   async getCollectionStats() {
     try {
-      const collection = await chromaService.getCollection();
-      if (!collection) {
-        return { 
-          count: 0, 
-          status: 'collection_not_found',
-          message: 'News articles collection not found in ChromaDB'
-        };
-      }
-
-      const count = await collection.count();
+      const index = await pineconeService.getIndex();
+      const stats = await index.describeIndexStats();
+      
       return { 
-        count, 
+        count: stats.totalRecordCount || 0, 
         status: 'ok',
-        message: `Collection contains ${count} chunks`
+        message: `Pinecone index contains ${stats.totalRecordCount || 0} vectors`
       };
     } catch (error) {
       console.error('Error getting collection stats:', error);
@@ -80,25 +70,6 @@ class RAGService {
         status: 'error', 
         error: error.message,
         message: 'Failed to get collection statistics'
-      };
-    }
-  }
-
-  async testRetrieval(query = "technology news", topK = 2) {
-    try {
-      const results = await this.retrieveRelevantChunks(query, topK);
-      return {
-        success: true,
-        query,
-        results,
-        count: results.length
-      };
-    } catch (error) {
-      return {
-        success: false,
-        query,
-        error: error.message,
-        results: []
       };
     }
   }
